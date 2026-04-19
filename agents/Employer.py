@@ -246,7 +246,11 @@ class EmployerAgent(mesa.Agent):
         for occ, c0 in self._cap_by_occ.items():
             r_occ = r_by_occ.get(occ, 0.5)
             p_occ = p_by_occ.get(occ, 0.3)
-            cstar = math.floor(c0 * (1.0 + g_jt) * (1.0 - a_jt * r_occ + gamma * a_jt * p_occ))
+            # Use round() not floor() so that small firms (c0=1-2 per occupation)
+            # are not driven to cstar=0 by tiny negative BTOS fluctuations.
+            # With BTOS clipped to [-0.15, 0.15]: round(1 × 0.85) = 1 (never 0).
+            # Large firms still contract proportionally: round(10 × 0.85) = 9.
+            cstar = round(c0 * (1.0 + g_jt) * (1.0 - a_jt * r_occ + gamma * a_jt * p_occ))
             cstar_by_occ[occ] = max(0, cstar)
             e_occ  = emp_by_occ.get(occ, 0)
             v_occ  = max(0, cstar_by_occ[occ] - e_occ)
@@ -263,7 +267,7 @@ class EmployerAgent(mesa.Agent):
         if self.model.ai_active and a_jt > 0:
             auto_sum = sum(a_jt * r_by_occ.get(o, 0.5) * c0
                            for o, c0 in self._cap_by_occ.items())
-            v_new = math.floor(sigma * a_jt * auto_sum)
+            v_new = round(sigma * a_jt * auto_sum)
             total_vacancies += v_new
             if v_new > 0:
                 self.model._new_economy_jobs_this_tick += v_new

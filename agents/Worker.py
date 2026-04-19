@@ -294,43 +294,43 @@ class WorkerAgent(mesa.Agent):
     def _retrain(self):
         """Count down retraining period; update skill profile when complete.
 
-        Retraining adds skills — it doesn't teleport the worker into a new
-        occupation. At completion:
-          - Risk scores (r_job, p_aug) blend toward the target occupation's
-            profile, weighted by retrain_blend (default 0.7 toward target).
-            The worker brings existing experience, not a clean slate.
-          - search_occ is set to target_occ so the worker searches in the
-            field they just trained for.
-          - current_occ only updates when the worker is actually hired (in
-            _search_for_job), making occupation change a market outcome.
-          - Worker detaches from employer: they must find the new role through
-            open-market matching, not same-employer re-absorption.
-          - is_retraining flag is cleared when retraining completes.
+        Intra-firm human capital accumulation: employed workers who upskill
+        stay at their current firm — retraining does not force a resignation.
+        Only unemployed workers increment months_unemployed during retraining.
+
+        At completion:
+          - Risk scores blend toward target occupation (r_job drops, p_aug rises).
+          - search_occ is set so the worker can target the new role if displaced.
+          - Employed workers remain on their employer's roster with updated skills.
+          - is_retraining flag is cleared.
         """
         self.retraining_ticks_left -= 1
-        self.months_unemployed += 1
+
+        # Only unemployed workers accumulate unemployment duration during retraining
+        if not self.is_employed:
+            self.months_unemployed += 1
 
         if self.retraining_ticks_left == 0:
             model   = self.model
             new_occ = self.target_occ
-            alpha   = self.params.get("retrain_blend", 0.7)  # weight toward target
+            alpha   = self.params.get("retrain_blend", 0.7)
 
-            # Blend risk scores: keep experience value, gain new-occupation profile
+            # Blend risk scores toward target: r_job drops, p_aug rises
             if new_occ in model.occ_risk_lookup["r_job"]:
                 target_r = model.occ_risk_lookup["r_job"][new_occ]
                 target_p = model.occ_risk_lookup["p_aug"][new_occ]
                 self.r_job = alpha * target_r + (1.0 - alpha) * self.r_job
                 self.p_aug = alpha * target_p + (1.0 - alpha) * self.p_aug
 
-            # Set search target; current_occ only updates on actual hire
-            self.search_occ    = new_occ
+            # Only unemployed workers get a hard occupational redirect.
+            # Employed workers keep their incumbent identity but retain the
+            # blended r_job / p_aug benefit — career pivot comes from
+            # disruption, not from background upskilling.
+            if not self.is_employed:
+                self.search_occ = new_occ
             self.has_retrained = True
             self.is_retraining = False
-
-            # Release from employer — must find new role through open market
-            if self.employer is not None:
-                self.employer._roster.discard(self)
-                self.employer = None
+            # Employed workers stay on their roster — no detachment
 
     # ── Experience & aging ───────────────────────────────────────────────────
 

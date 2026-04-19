@@ -25,6 +25,8 @@ N_SAMPLES ≥ 1000.
 
 import sys
 import pathlib
+import time
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -153,9 +155,31 @@ if __name__ == "__main__":
             f"vacancy_rate ∈ {PRIOR['vacancy_rate']}"
         )
 
-        particles = Parallel(n_jobs=-1, verbose=5)(
-            delayed(evaluate_particle)(i) for i in range(N_SAMPLES)
-        )
+        start_time = time.monotonic()
+        start_wall = datetime.now()
+        print(f"  started at  : {start_wall:%Y-%m-%d %H:%M:%S}")
+
+        particles  = []
+        REPORT_EVERY = 200
+        for i, result in enumerate(
+            Parallel(n_jobs=-1, return_as="generator_unordered")(
+                delayed(evaluate_particle)(j) for j in range(N_SAMPLES)
+            ),
+            start=1,
+        ):
+            particles.append(result)
+            if i % REPORT_EVERY == 0 or i == N_SAMPLES:
+                elapsed   = time.monotonic() - start_time
+                rate      = i / elapsed                          # particles/sec
+                remaining = (N_SAMPLES - i) / rate if rate > 0 else 0
+                eta       = datetime.now() + timedelta(seconds=remaining)
+                n_acc_so_far = sum(1 for p in particles if p is not None)
+                print(
+                    f"  [{datetime.now():%H:%M:%S}]  {i:>4}/{N_SAMPLES} done"
+                    f"  |  accepted so far: {n_acc_so_far}"
+                    f"  |  elapsed: {elapsed/60:.1f}m"
+                    f"  |  ETA: {eta:%H:%M:%S}"
+                )
 
         accepted     = [p for p in particles if p is not None]
         posterior_df = pd.DataFrame(accepted)
@@ -163,11 +187,12 @@ if __name__ == "__main__":
         OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         posterior_df.to_csv(OUTPUT_PATH, index=False)
 
+        elapsed_total = time.monotonic() - start_time
         n_acc = len(posterior_df)
         pct   = 100 * n_acc / N_SAMPLES
         print(
             f"\n[abc_calibration] Accepted {n_acc}/{N_SAMPLES} particles "
-            f"({pct:.1f} %)\n"
+            f"({pct:.1f} %)  |  total time: {elapsed_total/60:.1f}m\n"
             f"  Saved → {OUTPUT_PATH}"
         )
 

@@ -29,7 +29,7 @@ from agents.PublicSectorEmployer import PublicSectorEmployerAgent
 DEFAULT_PARAMS = {
     # ── Displacement hazard (new formula) ─────────────────────────────────────
     # P(D) = sigmoid(logit(δ_base) + β1*(A_jt*R_job) - β2*(A_jt*P_aug) - β3*E_i)
-    "delta_base":    0.02018, # baseline monthly turnover intercept (ABC posterior mean, N=161/2000)
+    "delta_base":    0.00726, # baseline monthly turnover intercept (ABC posterior mean, N=158/2000)
     "beta":          3.5,     # backward-compat alias for beta1
     "beta1":         3.5,     # automation displacement coefficient
     "beta2":         0.5,     # augmentation protection coefficient
@@ -82,7 +82,7 @@ DEFAULT_PARAMS = {
     # ρ is derived analytically at model init: ρ = -ln(1-f_target)/θ_base
     "f_target":       0.28,   # target monthly job-finding rate (Shimer 2005)
     "theta_base":     0.5,    # baseline tightness for ρ calibration
-    "vacancy_rate":   0.04434, # open positions as fraction of employment (ABC posterior mean)
+    "vacancy_rate":   0.04424, # open positions as fraction of employment (ABC posterior mean)
     "nu":             2.0,    # legacy experience premium (kept for compat)
 
     # ── Employer vacancy generation ────────────────────────────────────────────
@@ -95,14 +95,14 @@ DEFAULT_PARAMS = {
     "zipf_alpha":     2.0,    # Zipf exponent
     "employer_ratio": 22,     # Census 22:1 worker-to-employer ratio
 
-    # ── Calibrated from ABC sweep (output/abc_posterior.csv, 2026-04-18) ─────────
-    # Model fixes applied before this run: (1) g_init annual→monthly conversion,
-    # (2) OU mean-reversion replacing biased sector drift,
-    # (3) occupation-aware global market clearing,
-    # (4) strict 1-to-1 OLG replacement (stationary N=10,000).
-    # 161/2000 particles accepted (ε=0.005), target UR=4.5%, mean simulated UR=4.45%
-    # delta_base posterior: mean=0.02018, std=0.00161
-    # vacancy_rate posterior: mean=0.04434, std=0.01942
+    # ── Calibrated from ABC sweep (output/abc_posterior.csv, 2026-04-19) ─────────
+    # Model fixes applied before this run: (1) search_occ hard-redirect gated to
+    # unemployed workers only; (2) floor()→round() in C* vacancy formula to prevent
+    # small-firm distress cascade; (3) intra-firm retraining (no detachment);
+    # (4) global just_fired reset; (5) macro-pool OLG entry.
+    # 158/2000 particles accepted (ε=0.005), target UR=4.5%, mean simulated UR=4.62%
+    # delta_base posterior: mean=0.00726, std=0.00142
+    # vacancy_rate posterior: mean=0.04424, std=0.02143 (unidentified — reflects prior)
 }
 
 
@@ -230,11 +230,13 @@ class LaborMarketModel(mesa.Model):
                                    .map(self.occ_wage_lookup)
                                    .fillna(worker_df["wage"]))
 
-        # Keep young-worker pool for OLG entry (age 18-24, low experience)
-        _young_mask = worker_df["AGE"].between(18, 24) if "AGE" in worker_df.columns else \
-                      worker_df["age"].between(18, 24) if "age" in worker_df.columns else \
-                      pd.Series(False, index=worker_df.index)
-        self._young_worker_pool = worker_df[_young_mask].copy() if _young_mask.any() else worker_df.head(0).copy()
+        # Macro pool for OLG entry: full workforce distribution, not youth-only.
+        # Sampling from the full CPS distribution produces entrants whose
+        # occupation mix mirrors the economy-wide demand captured in C0,
+        # preventing the generational skills-gap that caused UR drift when
+        # sampling strictly from 18-24 year olds (retail/food-heavy).
+        # Age and experience are overwritten to youth values post-creation.
+        self._macro_worker_pool = worker_df.copy()
 
         # ── Vacancy and job-creation state ─────────────────────────────────────
         self.vacancy_counts           = {}   # employed-worker counts per OCC2010
@@ -455,23 +457,33 @@ class LaborMarketModel(mesa.Model):
                     worker.employer = None
 
     def _process_workforce_entry(self):
-        """Sample empirical 18-24 year olds to exactly replace this tick's retirements."""
-        if self._young_worker_pool.empty or self._retirements_this_tick <= 0:
+        """Replace each retirement with a new entrant drawn from the full CPS
+        occupation distribution, reset to youth demographics.
+
+        Sampling from the macro pool (not youth-only) ensures the entrant's
+        occupation matches the economy-wide distribution of C0 demand.
+        Overwriting age/experience to 18/0.0 simulates a stable educational
+        pipeline that continuously replenishes each occupation with fresh workers.
+        """
+        if self._macro_worker_pool.empty or self._retirements_this_tick <= 0:
             self._entries_this_tick = 0
             return
 
         n_new = self._retirements_this_tick
-        sample = self._young_worker_pool.sample(
-            n=min(n_new, len(self._young_worker_pool)),
+        sample = self._macro_worker_pool.sample(
+            n=n_new,
             replace=True,
             random_state=self.random.randint(0, 2**31 - 1),
         )
         for _, row in sample.iterrows():
             w = WorkerAgent(self, row, self.params)
-            w.is_employed       = False
-            w.months_unemployed = 0
-            w.exp_norm          = 0.0
-        self._entries_this_tick = len(sample)
+            w.age                  = 18
+            w.exp_norm             = 0.0
+            w.is_employed          = False
+            w.months_unemployed    = 0
+            w.just_fired           = False
+            w.retraining_ticks_left = 0
+        self._entries_this_tick = n_new
 
     # ── Spin-off: triggered by Worker._maybe_spinoff() ────────────────────────
 
@@ -530,6 +542,12 @@ class LaborMarketModel(mesa.Model):
         # OLG: retirement hazard + workforce entry
         self._process_retirements()
         self._process_workforce_entry()
+
+        # Global reset of temporal friction flag — ensures workers fired while
+        # retraining (who detached from the roster before the flag could be
+        # reset by _layoff_phase) are never permanently locked out of clearing.
+        for w in self.agents_by_type[WorkerAgent]:
+            w.just_fired = False
 
         self.tick += 1
 
