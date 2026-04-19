@@ -1,0 +1,114 @@
+
+<https://avm.com/ontologies/WorkerImpactOntology> a <http://www.w3.org/2002/07/owl#Ontology>;
+  <http://purl.org/dc/terms/title> "Worker Impact Ontology";
+  <http://www.w3.org/2002/07/owl#imports> <http://www.w3.org/2004/02/skos/core> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#Agent> a <http://www.w3.org/2002/07/owl#Class>;
+  <http://purl.org/dc/terms/title> "Agent" .
+
+<https://avm.com/ontologies/WorkerImpactOntology#Worker> a <http://www.w3.org/2002/07/owl#Class>;
+  <http://purl.org/dc/terms/title> "Worker";
+  <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://avm.com/ontologies/WorkerImpactOntology#Agent> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#Employer> a <http://www.w3.org/2002/07/owl#Class>;
+  <http://purl.org/dc/terms/title> "Employer";
+  <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://avm.com/ontologies/WorkerImpactOntology#Agent> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#SkillCategory> a <http://www.w3.org/2002/07/owl#Class>;
+  <http://purl.org/dc/terms/title> "Skill Category";
+  <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/2004/02/skos/core#ConceptScheme> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#Skill> a <http://www.w3.org/2002/07/owl#Class>;
+  <http://purl.org/dc/terms/title> "Skill";
+  <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/2004/02/skos/core#Concept> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#hasSkill> a <http://www.w3.org/2002/07/owl#ObjectProperty>;
+  <http://purl.org/dc/terms/title> "hasSkill";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Worker>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <https://avm.com/ontologies/WorkerImpactOntology#Skill> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#inCategory> a <http://www.w3.org/2002/07/owl#ObjectProperty>;
+  <http://purl.org/dc/terms/title> "inCategory";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Skill>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <https://avm.com/ontologies/WorkerImpactOntology#SkillCategory> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#Job> a <http://www.w3.org/2002/07/owl#Class>;
+  <http://purl.org/dc/terms/title> "Job" .
+
+<https://avm.com/ontologies/WorkerImpactOntology#postsJob> a <http://www.w3.org/2002/07/owl#ObjectProperty>;
+  <http://purl.org/dc/terms/title> "postsJob";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Employer>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <https://avm.com/ontologies/WorkerImpactOntology#Job> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#holdsJob> a <http://www.w3.org/2002/07/owl#ObjectProperty>;
+  <http://purl.org/dc/terms/title> "holdsJob";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Worker>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <https://avm.com/ontologies/WorkerImpactOntology#Job> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#requiresSkill> a <http://www.w3.org/2002/07/owl#ObjectProperty>;
+  <http://purl.org/dc/terms/title> "requiresSkill";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Job>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <https://avm.com/ontologies/WorkerImpactOntology#Skill> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#automationRisk> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "automationRisk";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Skill>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#float> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#monthsExperience> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "monthsExperience";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Skill>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#int> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#augmentationRisk> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "augmentationRisk";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Skill>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#float> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#workerID> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "workerID";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Worker>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#string> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#employerID> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "employerID";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Employer>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#string> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#jobID> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "jobID";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Job>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#string> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#salaryBottomRange> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "salaryBottomRange";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Job>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#float> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#salaryTopRange> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "salaryTopRange";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Job>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#float> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#hasSalary> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "hasSalary";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Worker>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#float> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#Tick> a <http://www.w3.org/2002/07/owl#Class>;
+  <http://purl.org/dc/terms/title> "Tick" .
+
+<https://avm.com/ontologies/WorkerImpactOntology#tickCount> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "tickCount";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Tick>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#int> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#agentAtTick> a <http://www.w3.org/2002/07/owl#ObjectProperty>;
+  <http://purl.org/dc/terms/title> "agentAtTick";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Tick>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <https://avm.com/ontologies/WorkerImpactOntology#Agent> .
+
+<https://avm.com/ontologies/WorkerImpactOntology#jobFilled> a <http://www.w3.org/2002/07/owl#DatatypeProperty>;
+  <http://purl.org/dc/terms/title> "jobFilled";
+  <http://www.w3.org/2000/01/rdf-schema#domain> <https://avm.com/ontologies/WorkerImpactOntology#Job>;
+  <http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#boolean> .

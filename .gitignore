@@ -1,0 +1,68 @@
+# ── Manuscript (author's property — excluded from source control) ──────────────
+manuscript.qmd
+manuscript_02.qmd
+manuscript*.qmd.bak
+*.pdf
+*.tex
+manuscript/
+manuscript_files/
+manuscript_02_files/
+_extensions/
+*.quarto_ipynb
+*.quarto_ipynb_*
+bibliography.bib
+bibliograph.bib
+lib/
+
+# ── Python environment ─────────────────────────────────────────────────────────
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.Python
+
+# ── Data (large raw files — not suitable for git) ─────────────────────────────
+data/
+*.gz
+*.dat
+
+# ── Large binary outputs (regenerable) ────────────────────────────────────────
+*.parquet
+*.zip
+*.html
+output/*.log
+output/*.png
+output/*.json
+output/simulation_results/
+output/figures/
+output/tables/
+
+# Keep the current calibration posterior (small CSV, important result)
+output/*.csv
+!output/abc_posterior.csv
+
+# ── Exploratory notebooks (not production code) ────────────────────────────────
+*.ipynb
+
+# ── Deprecated root-level scripts ─────────────────────────────────────────────
+print_outputs.py
+risk_scores.py
+time_run.py
+dataset_explore_02.html
+
+# ── IDE and system files ───────────────────────────────────────────────────────
+.DS_Store
+.Rhistory
+.Rproj.user/
+*.Rproj
+.claude/
+.jupyter_cache/
+.pytest_cache/
+.ruff_cache/
+*.swp
+*.swo
+.env
+
+# ── Personal documents ────────────────────────────────────────────────────────
+resources/
