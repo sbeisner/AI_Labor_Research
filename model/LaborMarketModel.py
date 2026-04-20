@@ -29,7 +29,7 @@ from agents.PublicSectorEmployer import PublicSectorEmployerAgent
 DEFAULT_PARAMS = {
     # ── Displacement hazard (new formula) ─────────────────────────────────────
     # P(D) = sigmoid(logit(δ_base) + β1*(A_jt*R_job) - β2*(A_jt*P_aug) - β3*E_i)
-    "delta_base":    0.00726, # baseline monthly turnover intercept (ABC posterior mean, N=158/2000)
+    "delta_base":    0.01201, # baseline monthly turnover intercept (ABC posterior mean, N=1341/2000)
     "beta":          3.5,     # backward-compat alias for beta1
     "beta1":         3.5,     # automation displacement coefficient
     "beta2":         0.5,     # augmentation protection coefficient
@@ -82,28 +82,108 @@ DEFAULT_PARAMS = {
     # ρ is derived analytically at model init: ρ = -ln(1-f_target)/θ_base
     "f_target":       0.28,   # target monthly job-finding rate (Shimer 2005)
     "theta_base":     0.5,    # baseline tightness for ρ calibration
-    "vacancy_rate":   0.04424, # open positions as fraction of employment (ABC posterior mean)
+    "vacancy_rate":   0.04485, # open positions as fraction of employment (ABC posterior mean)
     "nu":             2.0,    # legacy experience premium (kept for compat)
 
     # ── Employer vacancy generation ────────────────────────────────────────────
     "gamma":          0.3,    # augmentation demand elasticity
     "epsilon":        0.5,    # legacy direct-replacement fraction (kept for compat)
-    "btos_shock_std": 0.02,   # BTOS monthly shock std dev
-    "theta_ou":       0.1,    # OU mean-reversion speed (half-life ≈ 7 months)
+    "btos_shock_std":  0.02,   # BTOS monthly shock std dev (idiosyncratic, firm-level)
+    "btos_macro_std":  0.015,  # common macro shock std dev (same draw for all firms → Beveridge cyclicality)
+    "theta_ou":        0.1,    # OU mean-reversion speed (half-life ≈ 7 months)
+    "btos_disp_damp":  0.5,    # BTOS pass-through dampener: eff_base = delta*(1 - damp*btos); 0→no BTOS effect, 1→full pass-through
 
     # ── Firm-size distribution ─────────────────────────────────────────────────
     "zipf_alpha":     2.0,    # Zipf exponent
     "employer_ratio": 22,     # Census 22:1 worker-to-employer ratio
 
-    # ── Calibrated from ABC sweep (output/abc_posterior.csv, 2026-04-19) ─────────
-    # Model fixes applied before this run: (1) search_occ hard-redirect gated to
-    # unemployed workers only; (2) floor()→round() in C* vacancy formula to prevent
-    # small-firm distress cascade; (3) intra-firm retraining (no detachment);
-    # (4) global just_fired reset; (5) macro-pool OLG entry.
-    # 158/2000 particles accepted (ε=0.005), target UR=4.5%, mean simulated UR=4.62%
-    # delta_base posterior: mean=0.00726, std=0.00142
-    # vacancy_rate posterior: mean=0.04424, std=0.02143 (unidentified — reflects prior)
+    # ── Calibrated from ABC Run 9 (output/abc_posterior.csv, 2026-04-19) ────────
+    # Model fixes applied before Run 9:
+    #   (1) search_occ hard-redirect gated to unemployed workers only
+    #   (2) floor()→round() in C* vacancy formula (prevents small-firm distress cascade)
+    #   (3) BTOS dampener: eff_base = delta*(1 - btos_disp_damp*btos_signal)
+    #   (4) OLG timing: retirements + entries BEFORE employer clearing
+    #   (5) Matching fallback: workers seek in {search_occ, current_occ} — eliminates
+    #       permanent occupational mismatch lock-up that caused UR to drift indefinitely
+    # 1341/2000 particles accepted (ε=0.005), target UR=4.5%, mean simulated UR=4.54%
+    # delta_base posterior: mean=0.01201
+    # vacancy_rate posterior: mean=0.04485 (partially identified)
 }
+
+
+# ── Credential system ─────────────────────────────────────────────────────────
+#
+# Workers hold a credential level derived from their IPUMS CPS EDUC code.
+# Occupations require a minimum credential derived from their O*NET Job Zone.
+# Hiring is gated: workers below the required credential are excluded from
+# valid_candidates in _market_clearing().  Retraining time includes the time
+# to traverse the credential DAG from the worker's current level to the
+# minimum required by the target occupation.
+#
+# Workers can always abandon a credential path mid-way (they remain at their
+# current credential level; partial progress is not saved — a simplification
+# that reflects the all-or-nothing value of formal credentials).
+
+CREDENTIAL_LEVELS = ["high_school", "vocational", "associates",
+                     "bachelors", "masters", "doctoral"]
+CREDENTIAL_IDX    = {c: i for i, c in enumerate(CREDENTIAL_LEVELS)}
+
+# Directed graph: source → [(target, months)]
+# Encodes the diagram: HS is the root; doctoral is the ceiling.
+# Vocational and Associates are lateral entry-points for trades.
+CREDENTIAL_GRAPH = {
+    "high_school": [("vocational", 12), ("associates", 24), ("bachelors", 48)],
+    "vocational":  [("associates", 12)],
+    "associates":  [("bachelors",  24)],
+    "bachelors":   [("masters",    24), ("doctoral",  48)],
+    "masters":     [("doctoral",   24)],
+    "doctoral":    [],
+}
+
+# Minimum credential required by O*NET Job Zone
+ZONE_MIN_CREDENTIAL = {
+    1: "high_school",
+    2: "vocational",
+    3: "bachelors",
+    4: "masters",
+    5: "doctoral",
+}
+
+# IPUMS CPS EDUC code → credential level
+def educ_to_credential(educ: int) -> str:
+    if educ <= 50:                   # ≤ HS diploma / GED
+        return "high_school"
+    if educ < 80:                    # some college, associate's (EDUC 60–73)
+        return "associates"
+    if educ == 80:                   # bachelor's
+        return "bachelors"
+    if educ == 90:                   # master's
+        return "masters"
+    return "doctoral"                # professional (100) or doctoral (110)
+
+
+def credential_months_to(src: str, tgt: str) -> int:
+    """Shortest path (months) from src credential to tgt in the DAG.
+
+    Returns 0 if src already meets or exceeds tgt.
+    Returns a large sentinel (999) if the path is unreachable (should never
+    happen with a properly connected graph).
+    """
+    if CREDENTIAL_IDX.get(src, 0) >= CREDENTIAL_IDX.get(tgt, 0):
+        return 0
+    from collections import deque
+    q: deque = deque([(src, 0)])
+    seen = {src}
+    while q:
+        node, cost = q.popleft()
+        for nxt, months in CREDENTIAL_GRAPH.get(node, []):
+            total = cost + months
+            if nxt == tgt:
+                return total
+            if nxt not in seen:
+                seen.add(nxt)
+                q.append((nxt, total))
+    return 999   # unreachable
 
 
 def _default_data_dir():
@@ -179,6 +259,13 @@ class LaborMarketModel(mesa.Model):
         else:
             self.job_zone_lookup = {}
 
+        # ── Occupation minimum-credential lookup (OCC2010 → credential string) ──
+        # Derived from job_zone_lookup using ZONE_MIN_CREDENTIAL mapping.
+        self.occ_min_credential = {
+            occ: ZONE_MIN_CREDENTIAL.get(zone, "high_school")
+            for occ, zone in self.job_zone_lookup.items()
+        }
+
         # ── Occupation wage lookup (OCC2010 → median annual wage $K) ──────────
         wg_path = ddir / "occ_wage_lookup.parquet"
         if wg_path.exists():
@@ -247,6 +334,7 @@ class LaborMarketModel(mesa.Model):
         self._spinoffs_this_tick          = 0
         self._retirements_this_tick       = 0
         self._entries_this_tick           = 0
+        self._macro_shock_this_tick       = 0.0
         # Per-occupation matching inputs (θ for Poisson matching)
         self._tightness = {}
 
@@ -530,6 +618,21 @@ class LaborMarketModel(mesa.Model):
         self._open_market_hired_this_tick = 0
         self._spinoffs_this_tick          = 0
 
+        # Draw common macro shock once per tick — all employers add this same draw
+        # to their individual OU shock, creating aggregate BTOS cyclicality needed
+        # for the Beveridge curve to emerge.
+        macro_std = self.params.get("btos_macro_std", 0.015)
+        self._macro_shock_this_tick = self.random.gauss(0.0, macro_std)
+
+        # OLG runs BEFORE employer clearing so that:
+        #   (a) retiring workers are removed from rosters before _layoff_phase
+        #       counts them, and emp_by_occ gaps are visible to _generate_vacancies;
+        #   (b) new entrants are present in agents_by_type[WorkerAgent] when
+        #       _market_clearing builds global_seekers, eliminating the guaranteed
+        #       one-tick hiring delay that caused the unemployment pool to grow.
+        self._process_retirements()
+        self._process_workforce_entry()
+
         # Employers: layoff + vacancy generation + firm state + market clearing
         _employer_list = list(self._employers.values())
         self.random.shuffle(_employer_list)
@@ -538,10 +641,6 @@ class LaborMarketModel(mesa.Model):
 
         # Workers: retraining / job search / proactive upskilling / spin-offs
         self.agents_by_type[WorkerAgent].shuffle_do("step")
-
-        # OLG: retirement hazard + workforce entry
-        self._process_retirements()
-        self._process_workforce_entry()
 
         # Global reset of temporal friction flag — ensures workers fired while
         # retraining (who detached from the roster before the flag could be

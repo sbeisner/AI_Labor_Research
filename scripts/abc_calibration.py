@@ -51,11 +51,18 @@ FORCE_RERUN   = True   # True → ignore cache and re-run even if output exists
 # ── Prior bounds (uniform) ─────────────────────────────────────────────────────
 
 PRIOR = {
-    # Monthly turnover: wider upper bound to accommodate recall-model dynamics.
-    # With employer-recall, UR equilibrium requires higher separation rate
-    # (~1-6%/month) to maintain 4.5% frictional unemployment.
-    "delta_base":   (0.005, 0.060),
-    # Open-position fraction: JOLTS 3-5% baseline; allow 1-8% range.
+    # Monthly turnover — tightened from Run 8 (0.005, 0.060) based on Run 9
+    # pre-calibration sweep (seed=42, 120-tick runs with all 4 model fixes applied):
+    #   delta=0.006 → UR=3.88%  (reject)
+    #   delta=0.008 → UR=4.04%  (ACCEPT)
+    #   delta=0.015 → UR=4.73%  (ACCEPT)
+    #   delta=0.018 → UR=5.03%  (reject)
+    # Empirical acceptance region: delta ∈ [0.008, 0.017]
+    # Prior covers this with margins: (0.006, 0.020) → ~64% acceptance from delta alone.
+    "delta_base":   (0.006, 0.020),
+    # Open-position fraction: JOLTS 3-5% baseline; posterior was near-uniform in Run 8
+    # (vacancy_rate poorly identified by UR target alone).  Keep wide to allow ABC to
+    # characterize the non-identifiability rather than artificially narrow it.
     "vacancy_rate": (0.010, 0.080),
 }
 

@@ -21,6 +21,7 @@ import numpy as np
 import mesa
 
 from agents.Worker import WorkerAgent
+from model.LaborMarketModel import CREDENTIAL_IDX
 
 
 # Monthly drift by NAICS 2-digit sector prefix
@@ -154,21 +155,27 @@ class EmployerAgent(mesa.Agent):
 
         shock = self.random.gauss(0.0, shock_std)
 
+        # Common macro shock: same draw for all firms this tick (from model).
+        # Adds aggregate demand cyclicality so the Beveridge curve can emerge.
+        macro_shock = getattr(self.model, "_macro_shock_this_tick", 0.0)
+
         # Ornstein-Uhlenbeck Euler-Maruyama step:
-        # g_{j,t} = g_{j,t-1} + θ(μ_j - g_{j,t-1}) + σε_t
+        # g_{j,t} = g_{j,t-1} + θ(μ_j - g_{j,t-1}) + σ_idio*ε_{j,t} + σ_macro*η_t
         reversion_pull = theta * (mu - self.btos_signal)
         self.btos_signal = float(
-            np.clip(self.btos_signal + reversion_pull + shock, -0.15, 0.15)
+            np.clip(self.btos_signal + reversion_pull + shock + macro_shock, -0.15, 0.15)
         )
 
     # ── Phase 2: Layoff ──────────────────────────────────────────────────────
 
     def _layoff_phase(self):
         p = self.model.params
-        # Positive BTOS (growth) suppresses layoffs; negative amplifies them.
-        # Clamp to avoid logit(0) / logit(1) at BTOS extremes.
+        # BTOS modulates layoffs, but with a dampener so negative macro cycles
+        # don't overwhelm baseline turnover.  btos_disp_damp=0 → BTOS has no
+        # effect on separations; 1.0 → full pass-through (old behaviour).
+        btos_damp = p.get("btos_disp_damp", 0.5)
         eff_base = float(np.clip(
-            p["delta_base"] * (1.0 - self.btos_signal), 1e-9, 1.0 - 1e-9
+            p["delta_base"] * (1.0 - btos_damp * self.btos_signal), 1e-9, 1.0 - 1e-9
         ))
         c = math.log(eff_base / (1.0 - eff_base))   # logit(eff_base)
         self._fired_this_tick = 0
@@ -263,16 +270,19 @@ class EmployerAgent(mesa.Agent):
         self._cstar_this_tick  = cstar_by_occ
         self._vacancies_by_occ = vac_by_occ
 
-        # V_new: new economy vacancies from AI-automated roles
+        # V_new: new economy vacancies from AI-automated roles.
+        # Tracked for the data collector but NOT added to self.vacancies or
+        # _vacancies_by_occ — there is no occupation-matched pool for these
+        # slots, so counting them as posted vacancies would inflate the
+        # Beveridge curve with phantom demand that can never be filled.
         if self.model.ai_active and a_jt > 0:
             auto_sum = sum(a_jt * r_by_occ.get(o, 0.5) * c0
                            for o, c0 in self._cap_by_occ.items())
             v_new = round(sigma * a_jt * auto_sum)
-            total_vacancies += v_new
             if v_new > 0:
                 self.model._new_economy_jobs_this_tick += v_new
 
-        self.vacancies = max(0, total_vacancies)
+        self.vacancies = max(0, total_vacancies)  # matchable vacancies only
 
     # ── Phase 4: Firm state update ────────────────────────────────────────────
 
@@ -315,11 +325,16 @@ class EmployerAgent(mesa.Agent):
         if self.vacancies <= 0:
             return
 
+        # Retraining is a parallel state, not a lock-out.  Workers actively
+        # retraining remain visible to employers and can be hired for vacancies
+        # that match their current occupation.  If hired, is_employed flips to
+        # True and retraining_ticks_left continues to decrement in the background
+        # (see Worker._retrain(): months_unemployed and search_occ assignment are
+        # already conditioned on not is_employed, so no further changes needed).
         global_seekers = [
             w for w in self.model.agents_by_type[WorkerAgent]
             if not w.is_employed
             and not w.is_retired
-            and w.retraining_ticks_left == 0
             and not w.just_fired
         ]
 
@@ -330,9 +345,17 @@ class EmployerAgent(mesa.Agent):
             if n_open <= 0:
                 continue
 
+            # Workers are eligible for a vacancy in occ if they hold skills for it
+            # via either their retrained occupation (search_occ) or their prior
+            # occupation (current_occ).  Retraining adds skills; it doesn't void
+            # prior experience.  This prevents the mismatch lock-up where retrained
+            # workers are permanently excluded from their original occupation's
+            # vacancies even when no search_occ positions are available.
+            occ_min_cred = self.model.occ_min_credential.get(occ, "high_school")
             valid_candidates = [
                 w for w in global_seekers
-                if (w.search_occ if w.search_occ is not None else w.current_occ) == occ
+                if occ in ({w.search_occ, w.current_occ} - {None})
+                and CREDENTIAL_IDX.get(w.credential, 0) >= CREDENTIAL_IDX.get(occ_min_cred, 0)
             ]
 
             if not valid_candidates:
@@ -357,12 +380,17 @@ class EmployerAgent(mesa.Agent):
                 worker.months_unemployed = 0
 
                 if worker.search_occ is not None:
-                    worker.current_occ = worker.search_occ
-                    worker.search_occ  = None
-                    worker.job_zone = self.model.job_zone_lookup.get(
-                        worker.current_occ, worker.job_zone)
-                    worker.w_base = self.model.occ_wage_lookup.get(
-                        worker.current_occ, worker.w_base)
+                    if occ == worker.search_occ:
+                        # Worker filled a vacancy in their retrained occupation:
+                        # complete the career pivot and update wage/zone tables.
+                        worker.current_occ = worker.search_occ
+                        worker.job_zone = self.model.job_zone_lookup.get(
+                            worker.current_occ, worker.job_zone)
+                        worker.w_base = self.model.occ_wage_lookup.get(
+                            worker.current_occ, worker.w_base)
+                    # Whether hired into search_occ or current_occ, the worker
+                    # is employed again — clear the pending occupational redirect.
+                    worker.search_occ = None
 
                 self._hired_this_tick += 1
                 global_seekers.remove(worker)

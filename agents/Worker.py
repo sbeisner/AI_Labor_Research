@@ -1,5 +1,16 @@
 """Worker agent for the AI Labor Market ABM.
 
+Credential system
+-----------------
+Workers hold a ``credential`` attribute (one of the strings in
+``CREDENTIAL_LEVELS``) derived from their IPUMS CPS EDUC code at
+initialisation.  When retraining, the time cost now includes the DAG
+path from the worker's current credential to the minimum credential
+required by the target occupation (via ``credential_months_to``).
+On retraining completion the credential is upgraded to ``target_credential``.
+Young workers (age ≤ 22, credential == "high_school") receive an education-
+pipeline multiplier on their retraining entry probability.
+
 Implements the displacement, augmentation, retraining, and wage equations
 from the manuscript.
 
@@ -27,6 +38,11 @@ import math
 
 import numpy as np
 import mesa
+
+from model.LaborMarketModel import (
+    educ_to_credential, credential_months_to,
+    ZONE_MIN_CREDENTIAL, CREDENTIAL_IDX,
+)
 
 
 class WorkerAgent(mesa.Agent):
@@ -77,6 +93,13 @@ class WorkerAgent(mesa.Agent):
         self.target_occ            = self.current_occ
         self.retraining_ticks_left = 0
         self.has_retrained         = False
+
+        # ── Credential system ──
+        # Initial credential derived from IPUMS CPS EDUC code.
+        # target_credential is set when a retraining path begins and cleared
+        # (by upgrading self.credential) when retraining completes.
+        self.credential        = educ_to_credential(self.educ)
+        self.target_credential: str | None = None
 
         # Temporal friction flag: True for the tick in which this worker
         # was just fired. Prevents same-tick rehire — the worker cannot enter
@@ -220,6 +243,14 @@ class WorkerAgent(mesa.Agent):
                + p.get("xi", 0.03) * math.log(1.0 + d))
               * (1.0 - self.exp_norm))
         pr = max(0.0, min(1.0, pr))
+        # Young workers (≤22) with only a HS credential are disproportionately
+        # likely to enter the education pipeline — reflecting real-world patterns
+        # where recent high-school graduates pursue post-secondary credentials
+        # at much higher rates than mid-career workers.
+        # Multiplier: 2.0 at age 22, rising to ~4.0 at age 18.
+        if self.age <= 22 and self.credential == "high_school":
+            age_edu_mult = 2.0 + max(0.0, 22 - self.age) * 0.5
+            pr = min(1.0, pr * age_edu_mult)
         if self.random.random() < pr:
             self.is_retraining = True
             self._choose_target_skill()
@@ -244,7 +275,14 @@ class WorkerAgent(mesa.Agent):
         """Select target occupation via gravity model:
 
         P(s_j|S_i) ∝ V(s_j) · (1-R_job(s_j)) · exp(−μ · T_retrain(S_i, s_j))
-        T_retrain = C(Z_i, Z_j) + ceil(ω · min_{s∈S_i} d(s, s_j))
+        T_retrain = C(credential_src → credential_tgt) + ceil(ω · d(occ_i, occ_j))
+
+        The credential gap component is now computed via BFS over the credential
+        DAG (HS → Vocational → Associates → Bachelors → Masters → Doctoral),
+        replacing the old zone_ticks linear table.  This means a HS-diploma
+        worker targeting a bachelor's-zone occupation pays 48 months of
+        credential time, while an associate's-degree worker pays only 24 months
+        — making the gravity model realistically non-linear.
         """
         model       = self.model
         dist_matrix = model.skill_distance_matrix
@@ -253,26 +291,28 @@ class WorkerAgent(mesa.Agent):
         p           = self.params
         mu          = p.get("mu", 5.0)
         omega       = p.get("omega", 0.5)
-        # Credential gap table: index = zone gap (0-4), value = ticks penalty
-        zone_ticks  = p.get("zone_ticks", [0, 6, 12, 24, 36])
 
         if dist_matrix is None or self.current_occ not in dist_matrix.index:
             return
 
-        candidates = dist_matrix.columns.tolist()
-        d_row      = dist_matrix.loc[self.current_occ, candidates].values.astype(float)
-        v          = np.array([max(1, vacancies.get(c, 1)) for c in candidates], dtype=float)
-        r          = np.array([occ_risk["r_job"].get(c, 0.5) for c in candidates], dtype=float)
+        candidates   = dist_matrix.columns.tolist()
+        d_row        = dist_matrix.loc[self.current_occ, candidates].values.astype(float)
+        v            = np.array([max(1, vacancies.get(c, 1)) for c in candidates], dtype=float)
+        r            = np.array([occ_risk["r_job"].get(c, 0.5) for c in candidates], dtype=float)
 
-        # Job zones for candidate occupations
-        jz_lookup  = getattr(model, "job_zone_lookup", {})
-        z_i        = self.job_zone
-        z_j_arr    = np.array([jz_lookup.get(c, 3) for c in candidates], dtype=int)
-        # C(Z_i, Z_j): ticks for credential gap (only penalize upward transitions)
-        gap_arr    = np.clip(z_j_arr - z_i, 0, len(zone_ticks) - 1)
-        cred_ticks = np.array([zone_ticks[g] for g in gap_arr], dtype=float)
-        # Total retraining time: credential gap + skill distance component
-        t_retrain  = cred_ticks + np.ceil(omega * d_row)
+        # Credential gap (months) via DAG BFS for each candidate occupation
+        jz_lookup    = getattr(model, "job_zone_lookup", {})
+        src_cred     = self.credential
+        cred_months  = np.array([
+            credential_months_to(
+                src_cred,
+                ZONE_MIN_CREDENTIAL.get(jz_lookup.get(c, 3), "bachelors")
+            )
+            for c in candidates
+        ], dtype=float)
+
+        # Total retraining time: credential path + semantic skill distance
+        t_retrain = cred_months + np.ceil(omega * d_row)
 
         scores = v * (1.0 - r) * np.exp(-mu * t_retrain)
         total  = scores.sum()
@@ -284,12 +324,14 @@ class WorkerAgent(mesa.Agent):
         self.target_occ = chosen
 
         if chosen != self.current_occ:
-            dist           = float(dist_matrix.loc[self.current_occ, chosen])
-            z_j            = jz_lookup.get(chosen, 3)
-            gap            = max(0, z_j - self.job_zone)
-            cred_pen       = zone_ticks[min(gap, len(zone_ticks) - 1)]
-            skill_pen      = max(1, math.ceil(omega * dist))
+            dist      = float(dist_matrix.loc[self.current_occ, chosen])
+            tgt_cred  = ZONE_MIN_CREDENTIAL.get(jz_lookup.get(chosen, 3), "bachelors")
+            cred_pen  = credential_months_to(src_cred, tgt_cred)
+            skill_pen = max(1, math.ceil(omega * dist))
             self.retraining_ticks_left = max(1, cred_pen + skill_pen)
+            # Store the credential level this path is working toward so
+            # _retrain() can upgrade self.credential on completion.
+            self.target_credential = tgt_cred if cred_pen > 0 else None
 
     def _retrain(self):
         """Count down retraining period; update skill profile when complete.
@@ -321,6 +363,14 @@ class WorkerAgent(mesa.Agent):
                 target_p = model.occ_risk_lookup["p_aug"][new_occ]
                 self.r_job = alpha * target_r + (1.0 - alpha) * self.r_job
                 self.p_aug = alpha * target_p + (1.0 - alpha) * self.p_aug
+
+            # Upgrade credential if this retraining path required one.
+            if self.target_credential is not None:
+                tgt_idx = CREDENTIAL_IDX.get(self.target_credential, 0)
+                src_idx = CREDENTIAL_IDX.get(self.credential, 0)
+                if tgt_idx > src_idx:
+                    self.credential = self.target_credential
+            self.target_credential = None
 
             # Only unemployed workers get a hard occupational redirect.
             # Employed workers keep their incumbent identity but retain the
