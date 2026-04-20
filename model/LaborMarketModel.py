@@ -29,7 +29,9 @@ from agents.PublicSectorEmployer import PublicSectorEmployerAgent
 DEFAULT_PARAMS = {
     # ── Displacement hazard (new formula) ─────────────────────────────────────
     # P(D) = sigmoid(logit(δ_base) + β1*(A_jt*R_job) - β2*(A_jt*P_aug) - β3*E_i)
-    "delta_base":    0.01201, # baseline monthly turnover intercept (ABC posterior mean, N=1341/2000)
+    "delta_base":    0.01180, # baseline monthly turnover intercept; recalibrated after credential-system
+                              # structural additions (Run 9 ABC posterior: 0.01201; pre-sweep with 12 seeds
+                              # per candidate confirmed 0.01180 best recovers the 4.5% UR target)
     "beta":          3.5,     # backward-compat alias for beta1
     "beta1":         3.5,     # automation displacement coefficient
     "beta2":         0.5,     # augmentation protection coefficient
@@ -111,80 +113,14 @@ DEFAULT_PARAMS = {
 }
 
 
-# ── Credential system ─────────────────────────────────────────────────────────
-#
-# Workers hold a credential level derived from their IPUMS CPS EDUC code.
-# Occupations require a minimum credential derived from their O*NET Job Zone.
-# Hiring is gated: workers below the required credential are excluded from
-# valid_candidates in _market_clearing().  Retraining time includes the time
-# to traverse the credential DAG from the worker's current level to the
-# minimum required by the target occupation.
-#
-# Workers can always abandon a credential path mid-way (they remain at their
-# current credential level; partial progress is not saved — a simplification
-# that reflects the all-or-nothing value of formal credentials).
-
-CREDENTIAL_LEVELS = ["high_school", "vocational", "associates",
-                     "bachelors", "masters", "doctoral"]
-CREDENTIAL_IDX    = {c: i for i, c in enumerate(CREDENTIAL_LEVELS)}
-
-# Directed graph: source → [(target, months)]
-# Encodes the diagram: HS is the root; doctoral is the ceiling.
-# Vocational and Associates are lateral entry-points for trades.
-CREDENTIAL_GRAPH = {
-    "high_school": [("vocational", 12), ("associates", 24), ("bachelors", 48)],
-    "vocational":  [("associates", 12)],
-    "associates":  [("bachelors",  24)],
-    "bachelors":   [("masters",    24), ("doctoral",  48)],
-    "masters":     [("doctoral",   24)],
-    "doctoral":    [],
-}
-
-# Minimum credential required by O*NET Job Zone
-ZONE_MIN_CREDENTIAL = {
-    1: "high_school",
-    2: "vocational",
-    3: "bachelors",
-    4: "masters",
-    5: "doctoral",
-}
-
-# IPUMS CPS EDUC code → credential level
-def educ_to_credential(educ: int) -> str:
-    if educ <= 50:                   # ≤ HS diploma / GED
-        return "high_school"
-    if educ < 80:                    # some college, associate's (EDUC 60–73)
-        return "associates"
-    if educ == 80:                   # bachelor's
-        return "bachelors"
-    if educ == 90:                   # master's
-        return "masters"
-    return "doctoral"                # professional (100) or doctoral (110)
-
-
-def credential_months_to(src: str, tgt: str) -> int:
-    """Shortest path (months) from src credential to tgt in the DAG.
-
-    Returns 0 if src already meets or exceeds tgt.
-    Returns a large sentinel (999) if the path is unreachable (should never
-    happen with a properly connected graph).
-    """
-    if CREDENTIAL_IDX.get(src, 0) >= CREDENTIAL_IDX.get(tgt, 0):
-        return 0
-    from collections import deque
-    q: deque = deque([(src, 0)])
-    seen = {src}
-    while q:
-        node, cost = q.popleft()
-        for nxt, months in CREDENTIAL_GRAPH.get(node, []):
-            total = cost + months
-            if nxt == tgt:
-                return total
-            if nxt not in seen:
-                seen.add(nxt)
-                q.append((nxt, total))
-    return 999   # unreachable
-
+# ── Credential system (see model/credentials.py) ──────────────────────────────
+# All credential constants and helpers live in model/credentials.py to avoid
+# circular imports (LaborMarketModel imports Worker/Employer, which need these).
+# Re-export here so existing call sites (occ_min_credential build, etc.) work.
+from model.credentials import (                          # noqa: E402
+    CREDENTIAL_LEVELS, CREDENTIAL_IDX, CREDENTIAL_GRAPH,
+    ZONE_MIN_CREDENTIAL, educ_to_credential, credential_months_to,
+)
 
 def _default_data_dir():
     import pathlib
@@ -265,6 +201,45 @@ class LaborMarketModel(mesa.Model):
             occ: ZONE_MIN_CREDENTIAL.get(zone, "high_school")
             for occ, zone in self.job_zone_lookup.items()
         }
+        # Integer-index version for O(1) vectorized use in _choose_target_skill()
+        # and market clearing.  Avoids repeated CREDENTIAL_IDX dict lookups.
+        self.occ_min_cred_idx = {
+            occ: CREDENTIAL_IDX.get(cred, 0)
+            for occ, cred in self.occ_min_credential.items()
+        }
+
+        # ── Precomputed gravity-model arrays (aligned to dist_matrix columns) ──
+        # These are computed once at init and shared across all workers.
+        # Eliminates per-retraining-call pandas .loc lookups and 537-item Python
+        # list comprehensions that were the main per-tick overhead bottleneck.
+        if self.skill_distance_matrix is not None:
+            self._cand_occs: list = self.skill_distance_matrix.columns.tolist()
+            # OCC2010 → position index in _cand_occs
+            self._cand_occ_to_col: dict = {occ: i for i, occ in enumerate(self._cand_occs)}
+            # Row index for dist_matrix (index may differ from columns order)
+            self._cand_occ_to_row: dict = {
+                occ: i for i, occ in enumerate(self.skill_distance_matrix.index.tolist())
+            }
+            # Raw numpy distance array — avoids pandas label-lookup overhead
+            self._dist_array: np.ndarray = self.skill_distance_matrix.values.astype(np.float32)
+            # Static per-occupation arrays (don't change between ticks)
+            _r_job = self.occ_risk_lookup.get("r_job", {})
+            self._cand_r_arr: np.ndarray = np.array(
+                [_r_job.get(c, 0.5) for c in self._cand_occs], dtype=np.float32
+            )
+            from model.credentials import CRED_DIST_MATRIX  # noqa: PLC0415
+            self._cand_min_cred_idx_arr: np.ndarray = np.array(
+                [self.occ_min_cred_idx.get(c, 0) for c in self._cand_occs], dtype=np.int32
+            )
+            self._cand_vacancy_arr: np.ndarray = np.ones(len(self._cand_occs), dtype=np.float32)
+        else:
+            self._cand_occs = []
+            self._cand_occ_to_col = {}
+            self._cand_occ_to_row = {}
+            self._dist_array = None
+            self._cand_r_arr = np.array([], dtype=np.float32)
+            self._cand_min_cred_idx_arr = np.array([], dtype=np.int32)
+            self._cand_vacancy_arr = np.array([], dtype=np.float32)
 
         # ── Occupation wage lookup (OCC2010 → median annual wage $K) ──────────
         wg_path = ddir / "occ_wage_lookup.parquet"
@@ -429,7 +404,8 @@ class LaborMarketModel(mesa.Model):
         self.datacollector = DataCollector(
             model_reporters={
                 "Employment_Rate":      lambda m: _emp_rate(m),
-                "Unemployed_Count":     lambda m: _worker_sum(m, lambda a: not a.is_employed and not a.is_retired),
+                "Unemployed_Count":     lambda m: _worker_sum(m, lambda a: not a.is_employed and not a.is_retired and not a.is_olf),
+                "OLF_Count":           lambda m: _worker_sum(m, lambda a: a.is_olf and not a.is_retired),
                 "Mean_Wage":            lambda m: _mean_wage(m),
                 "Emp_Rate_Q1_Low":      lambda m: _emp_rate_q(m, "Q1_Low"),
                 "Emp_Rate_Q2":          lambda m: _emp_rate_q(m, "Q2"),
@@ -492,6 +468,13 @@ class LaborMarketModel(mesa.Model):
                 for occ, v in getattr(emp, "_vacancies_by_occ", {}).items():
                     eff[occ] = eff.get(occ, 0) + v
         self.effective_vacancy_counts = eff
+        # Rebuild per-candidate vacancy array aligned to _cand_occs so
+        # Worker._choose_target_skill() can skip the 537-item dict comprehension.
+        if self._cand_occs:
+            self._cand_vacancy_arr = np.maximum(
+                1.0,
+                np.array([eff.get(c, 1) for c in self._cand_occs], dtype=np.float32)
+            )
 
     def _update_job_market(self):
         """Compute per-occupation labor market tightness θ for Poisson matching.
@@ -654,7 +637,18 @@ class LaborMarketModel(mesa.Model):
 # ── Reporter helpers (module-level for pickling) ───────────────────────────────
 
 def _workers(m):
+    """All non-retired workers (employed + unemployed + OLF)."""
     return [a for a in m.agents_by_type[WorkerAgent] if not a.is_retired]
+
+
+def _labor_force(m):
+    """Active labor force: employed + unemployed, excluding OLF students.
+
+    Mirrors BLS methodology: full-time students pursuing a credential upgrade
+    are Out of Labor Force (OLF) and appear in neither the numerator nor the
+    denominator of the unemployment rate.
+    """
+    return [a for a in _workers(m) if not a.is_olf]
 
 
 def _worker_sum(m, fn):
@@ -667,8 +661,9 @@ def _retrained_share(m):
 
 
 def _emp_rate(m):
-    ws = _workers(m)
-    return sum(a.is_employed for a in ws) / len(ws) if ws else 0.0
+    """Employment rate over the active labor force (excludes OLF students)."""
+    lf = _labor_force(m)
+    return sum(a.is_employed for a in lf) / len(lf) if lf else 0.0
 
 
 def _mean_wage(m):

@@ -39,9 +39,9 @@ import math
 import numpy as np
 import mesa
 
-from model.LaborMarketModel import (
+from model.credentials import (
     educ_to_credential, credential_months_to,
-    ZONE_MIN_CREDENTIAL, CREDENTIAL_IDX,
+    ZONE_MIN_CREDENTIAL, CREDENTIAL_IDX, CRED_DIST_MATRIX,
 )
 
 
@@ -99,7 +99,18 @@ class WorkerAgent(mesa.Agent):
         # target_credential is set when a retraining path begins and cleared
         # (by upgrading self.credential) when retraining completes.
         self.credential        = educ_to_credential(self.educ)
+        self.credential_idx    = CREDENTIAL_IDX.get(self.credential, 0)  # cached int for fast comparisons
         self.target_credential: str | None = None
+
+        # ── Out-of-Labor-Force (OLF) flag ──
+        # Workers pursuing a formal credential upgrade (e.g., going back to
+        # school for an associate's or bachelor's degree) are classified as OLF,
+        # not unemployed, mirroring BLS methodology: full-time students who are
+        # not actively seeking work are excluded from both the numerator and
+        # denominator of the unemployment rate.  The flag is set in
+        # _choose_target_skill() when an unemployed worker begins a credential
+        # path, and cleared on hiring or on retraining completion.
+        self.is_olf = False
 
         # Temporal friction flag: True for the tick in which this worker
         # was just fired. Prevents same-tick rehire — the worker cannot enter
@@ -284,32 +295,27 @@ class WorkerAgent(mesa.Agent):
         credential time, while an associate's-degree worker pays only 24 months
         — making the gravity model realistically non-linear.
         """
-        model       = self.model
-        dist_matrix = model.skill_distance_matrix
-        occ_risk    = model.occ_risk_lookup
-        vacancies   = model.effective_vacancy_counts
-        p           = self.params
-        mu          = p.get("mu", 5.0)
-        omega       = p.get("omega", 0.5)
+        model = self.model
+        p     = self.params
+        mu       = p.get("mu", 5.0)
+        omega    = p.get("omega", 0.5)
 
-        if dist_matrix is None or self.current_occ not in dist_matrix.index:
+        # Use precomputed arrays from model init — avoids per-call pandas .loc
+        # and 537-item Python list comprehensions on every retraining event.
+        if model._dist_array is None or self.current_occ not in model._cand_occ_to_row:
             return
 
-        candidates   = dist_matrix.columns.tolist()
-        d_row        = dist_matrix.loc[self.current_occ, candidates].values.astype(float)
-        v            = np.array([max(1, vacancies.get(c, 1)) for c in candidates], dtype=float)
-        r            = np.array([occ_risk["r_job"].get(c, 0.5) for c in candidates], dtype=float)
+        candidates = model._cand_occs                           # list[int], len=537
+        row_idx    = model._cand_occ_to_row[self.current_occ]
+        d_row      = model._dist_array[row_idx].astype(float)  # numpy row slice — no pandas
+        r          = model._cand_r_arr.astype(float)            # precomputed static
+        v          = model._cand_vacancy_arr.astype(float)     # rebuilt each tick in _update_effective_vacancies
 
-        # Credential gap (months) via DAG BFS for each candidate occupation
-        jz_lookup    = getattr(model, "job_zone_lookup", {})
-        src_cred     = self.credential
-        cred_months  = np.array([
-            credential_months_to(
-                src_cred,
-                ZONE_MIN_CREDENTIAL.get(jz_lookup.get(c, 3), "bachelors")
-            )
-            for c in candidates
-        ], dtype=float)
+        # Credential gap — single numpy fancy-index into 6×6 distance matrix
+        cred_months = CRED_DIST_MATRIX[
+            self.credential_idx, model._cand_min_cred_idx_arr
+        ].astype(float)
+        occ_min_cred_idx = model.occ_min_cred_idx  # still needed for chosen-occ lookup below
 
         # Total retraining time: credential path + semantic skill distance
         t_retrain = cred_months + np.ceil(omega * d_row)
@@ -320,18 +326,31 @@ class WorkerAgent(mesa.Agent):
             return
 
         probs  = scores / total
-        chosen = self.random.choices(candidates, weights=probs.tolist(), k=1)[0]
+        # Use cumsum + searchsorted: avoids converting numpy array to Python list
+        # (self.random.choices requires a list, which is expensive at 537 elements).
+        # self.random.random() keeps us on the Mesa-seeded RNG for reproducibility.
+        chosen = candidates[int(np.searchsorted(np.cumsum(probs), self.random.random())
+                                .clip(0, len(candidates) - 1))]
         self.target_occ = chosen
 
         if chosen != self.current_occ:
-            dist      = float(dist_matrix.loc[self.current_occ, chosen])
-            tgt_cred  = ZONE_MIN_CREDENTIAL.get(jz_lookup.get(chosen, 3), "bachelors")
-            cred_pen  = credential_months_to(src_cred, tgt_cred)
-            skill_pen = max(1, math.ceil(omega * dist))
+            col_idx      = model._cand_occ_to_col.get(chosen, -1)
+            dist         = float(model._dist_array[row_idx, col_idx]) if col_idx >= 0 else 1.0
+            tgt_cred_idx = int(occ_min_cred_idx.get(chosen, 0))
+            cred_pen     = int(CRED_DIST_MATRIX[self.credential_idx, tgt_cred_idx])
+            skill_pen    = max(1, math.ceil(omega * dist))
             self.retraining_ticks_left = max(1, cred_pen + skill_pen)
             # Store the credential level this path is working toward so
             # _retrain() can upgrade self.credential on completion.
-            self.target_credential = tgt_cred if cred_pen > 0 else None
+            self.target_credential = (CREDENTIAL_LEVELS[tgt_cred_idx]
+                                      if cred_pen > 0 else None)
+
+            # Unemployed workers pursuing a formal credential upgrade become OLF
+            # (full-time students), consistent with BLS methodology.  They remain
+            # visible to employers (a job offer can pull them back) but are not
+            # counted in the unemployment rate while enrolled.
+            if not self.is_employed and self.target_credential is not None:
+                self.is_olf = True
 
     def _retrain(self):
         """Count down retraining period; update skill profile when complete.
@@ -367,10 +386,11 @@ class WorkerAgent(mesa.Agent):
             # Upgrade credential if this retraining path required one.
             if self.target_credential is not None:
                 tgt_idx = CREDENTIAL_IDX.get(self.target_credential, 0)
-                src_idx = CREDENTIAL_IDX.get(self.credential, 0)
-                if tgt_idx > src_idx:
-                    self.credential = self.target_credential
+                if tgt_idx > self.credential_idx:
+                    self.credential     = self.target_credential
+                    self.credential_idx = tgt_idx
             self.target_credential = None
+            self.is_olf = False  # re-enter labor force on program completion
 
             # Only unemployed workers get a hard occupational redirect.
             # Employed workers keep their incumbent identity but retain the

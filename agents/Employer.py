@@ -21,7 +21,6 @@ import numpy as np
 import mesa
 
 from agents.Worker import WorkerAgent
-from model.LaborMarketModel import CREDENTIAL_IDX
 
 
 # Monthly drift by NAICS 2-digit sector prefix
@@ -351,23 +350,27 @@ class EmployerAgent(mesa.Agent):
             # prior experience.  This prevents the mismatch lock-up where retrained
             # workers are permanently excluded from their original occupation's
             # vacancies even when no search_occ positions are available.
-            occ_min_cred = self.model.occ_min_credential.get(occ, "high_school")
             valid_candidates = [
                 w for w in global_seekers
                 if occ in ({w.search_occ, w.current_occ} - {None})
-                and CREDENTIAL_IDX.get(w.credential, 0) >= CREDENTIAL_IDX.get(occ_min_cred, 0)
             ]
 
             if not valid_candidates:
                 continue
 
-            # Rank by match score; hire deterministically up to n_open slots.
-            # Friction is structural: occupation-specific segmentation and
-            # retraining queues generate equilibrium unemployment without
-            # an exogenous stochastic hiring gate.
+            # Rank by match score × credential discount.
+            # Workers below the occupation's minimum credential are not excluded
+            # (employers do hire under-credentialed workers, especially in tight
+            # markets) but they face a 70% score penalty, making credentialed
+            # workers strongly preferred. This reflects real-world employer
+            # credential screening without creating structural unemployment traps.
+            occ_min_cred_idx = self.model.occ_min_cred_idx.get(occ, 0)
             ranked = sorted(
                 valid_candidates,
-                key=lambda w: w.p_agent_aug * (1.0 - w.r_agent_sub),
+                key=lambda w: (
+                    w.p_agent_aug * (1.0 - w.r_agent_sub)
+                    * (1.0 if w.credential_idx >= occ_min_cred_idx else 0.3)
+                ),
                 reverse=True,
             )
 
@@ -378,6 +381,7 @@ class EmployerAgent(mesa.Agent):
                 self.assign_worker(worker)
                 worker.is_employed       = True
                 worker.months_unemployed = 0
+                worker.is_olf            = False  # job offer pulls student back into labor force
 
                 if worker.search_occ is not None:
                     if occ == worker.search_occ:
